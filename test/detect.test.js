@@ -76,5 +76,16 @@ for (const chord of M.CHORDS) {
   console.log(`${full.ok ? 'ok  ' : 'FAIL'} ${chord.key.padEnd(6)} ${res.join('  ') || '(no open strings)'}`);
 }
 console.log(`muted open strings caught: ${caught}/${total}`);
+
+// Quiet playing: the same chords 40 dB softer must still be recognized.
+console.log('\nQuiet strums (-40 dB)');
+let quietFail = 0;
+for (const chord of M.CHORDS) {
+  const sig = pluck(M.chordNotesMidi(chord).map(M.midiToFreq), N, 5).map(v => v * 0.01);
+  const db = fftDb(sig);
+  const r = M.matchChord(M.chromaFromSpectrum(db, SR, N), chord, { db, sampleRate: SR, fftSize: N });
+  if (!r.ok) { quietFail++; fail++; console.log(`FAIL quiet ${chord.key}: missing [${r.missing}] open [${r.openMissing}]`); }
+}
+console.log(quietFail ? `${quietFail} quiet chords rejected` : 'all quiet chords recognized');
 console.log(`\n${fail ? fail + ' failures' : 'all passed'}; wrong-chord accepts: ${wrongAccepts}`);
 process.exit(fail ? 1 : 0);

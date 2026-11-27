@@ -49,7 +49,7 @@
   const Engine = {
     ctx: null, analyser: null, stream: null, src: null, running: false,
     timeBuf: null, freqBuf: null, listeners: new Set(), mode: 'pitch',
-    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0, rmsHist: [],
+    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0, onsetId: 0, rmsHist: [],
 
     ensureCtx() {
       if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -119,20 +119,21 @@
       const rms = Math.sqrt(sum / n);
       const gate = this.gate();
       const loud = rms > gate;
-      // Noise floor = the quiet end (10th percentile) of the last ~5 s. A steady noisy
-      // room raises the threshold instead of counting as one endless strum.
+      // Noise floor = the quietest moments (5th percentile) of the last ~8 s. A steady
+      // noisy room raises the threshold; a long-ringing guitar does not, because the
+      // short gaps between strums and chord changes keep the estimate low.
       this.rmsHist.push(rms);
-      if (this.rmsHist.length > 125) this.rmsHist.shift();
+      if (this.rmsHist.length > 200) this.rmsHist.shift();
       if (this.rmsHist.length >= 10) {
         const sorted = [...this.rmsHist].sort((a, b) => a - b);
-        this.noise = sorted[Math.floor(sorted.length * 0.1)];
+        this.noise = sorted[Math.floor(sorted.length * 0.05)];
       }
       // A new strum: sound starts, or jumps up sharply while ringing.
-      if (loud && (this.prevRms <= gate || rms > this.prevRms * 2)) this.onsetAt = now;
+      if (loud && (this.prevRms <= gate || rms > this.prevRms * 2)) { this.onsetAt = now; this.onsetId++; }
       this.prevRms = rms;
       const frame = {
         time: this.ctx.currentTime, dt, rms, loud, level: Math.sqrt(clamp(rms / 0.15, 0, 1)),
-        sinceOnset: loud ? now - this.onsetAt : 0,
+        sinceOnset: loud ? now - this.onsetAt : 0, onsetId: this.onsetId, gate,
       };
       if (loud && this.mode === 'chroma') {
         an.getFloatFrequencyData(this.freqBuf);
@@ -235,14 +236,37 @@
   }
   const ALL_KEYS = M.CHORDS.map(c => c.key);
 
-  // Chord check for a frame; open strings are required unless switched off in Settings.
-  function check(f, chord) {
-    return M.matchChord(f.chroma, chord, S.prefs.strictOpen ? f.spectrum : undefined);
-  }
   // The FFT window still holds the pick attack (energy at every pitch) for a while after a strum.
   const SETTLE_MS = 120;
   const settled = f => f.loud && f.chroma && f.sinceOnset >= SETTLE_MS;
-  const isClean = (f, chord) => !!(settled(f) && check(f, chord).ok);
+
+  // Judges one strum against a chord. The notes must match for a short, mostly continuous
+  // time. Each open string only has to ring clearly at some point during the strum
+  // (in at least 3 moments, to rule out noise), not in every moment: real strums on a phone mic are
+  // uneven, and asking for every moment rejected clean chords.
+  function strumJudge() {
+    const hold = holdTimer();
+    let seen = {}, lastOnset = -1, bodyMs = 0, notesOk = false, prevRms = 0;
+    const reset = () => { hold.reset(); seen = {}; bodyMs = 0; notesOk = false; prevRms = 0; };
+    return {
+      reset,
+      feed(f, chord) {
+        if (f.onsetId !== lastOnset) { lastOnset = f.onsetId; reset(); }
+        if (!settled(f)) return null;
+        bodyMs += f.dt;
+        const r = M.matchChord(f.chroma, chord);
+        const opens = f.spectrum ? M.openStringCheck(f.spectrum, chord) : [];
+        // Count open strings only while the sound is fading: a string still being hit
+        // (slow strum, stray brush) briefly puts energy at every pitch.
+        const fading = f.rms <= prevRms * 1.05;
+        prevRms = f.rms;
+        if (fading) opens.forEach(o => { if (o.ok) seen[o.label] = (seen[o.label] || 0) + 1; });
+        if (hold.add(r.ok, f.dt) >= 250) notesOk = true;
+        const openMissing = S.prefs.strictOpen ? opens.filter(o => (seen[o.label] || 0) < 3).map(o => o.label) : [];
+        return { r, opens, seen, notesOk, openMissing, clean: notesOk && openMissing.length === 0, bodyMs };
+      },
+    };
+  }
 
   // Accumulates how long a condition has been (mostly) true: a single bad frame
   // takes time off instead of starting over, so real, slightly noisy strums still count.
@@ -326,7 +350,7 @@
   // ---------------------------------------------------------------- chord practice
   const Practice = (() => {
     let current = null, count = 0, locked = false, loudMs = 0, lastMsgAt = 0, order = 0, peak = 0, hints = {};
-    const hold = holdTimer();
+    const judge = strumJudge();
     const cols = [];
     M.NOTE_NAMES.forEach(n => {
       const c = document.createElement('div'); c.className = 'note-col';
@@ -358,7 +382,7 @@
       $('pDiagram').innerHTML = diagram(current);
       const shape = new Set(M.chordNotesMidi(current).map(M.pitchClass));
       cols.forEach((c, i) => c.classList.toggle('tone', shape.has(i)));
-      locked = false; hold.reset(); loudMs = 0; peak = 0; hints = {}; lastMsgAt = 0;
+      locked = false; judge.reset(); loudMs = 0; peak = 0; hints = {}; lastMsgAt = 0;
       status(Engine.running ? 'Strum the chord and let it ring.' : 'Start the mic, then strum the chord.');
     }
     function next() {
@@ -380,17 +404,18 @@
         const v = f.chroma ? f.chroma[i] : 0;
         c.firstChild.style.height = Math.max(4, v * 100).toFixed(0) + '%';
       });
+      detail(f);
       if (locked) return;
       if (!f.loud || !f.chroma) {
-        hold.reset(); loudMs = 0; peak = 0; hints = {};
+        loudMs = 0; peak = 0; hints = {};
         return;
       }
       loudMs += f.dt;
       peak = Math.max(peak, f.rms);
-      if (!settled(f)) return;
-      const r = check(f, current);
-      if (f.rms >= peak * 0.3) detail(f, r);
-      if (hold.add(r.ok, f.dt) >= 250) {
+      const j = judge.feed(f, current);
+      if (!j) return;
+      lastJudge = j;
+      if (j.clean) {
         locked = true; count++; S.clean++; save(); markDay();
         $('pCount').textContent = count;
         status(`Clean ${current.key}!`, 'good');
@@ -399,30 +424,37 @@
         setTimeout(next, 1100);
         return;
       }
-      // Collect hints only from the body of the strum (not the attack or the fading tail),
-      // then show the most common one.
-      if (!r.ok && f.rms >= peak * 0.3) {
-        const h = hintFor(r);
+      // Note hints come from the body of the strum (not the fading tail); show the most common.
+      if (!j.r.ok && f.rms >= peak * 0.3) {
+        const h = hintFor(j.r);
         hints[h] = (hints[h] || 0) + 1;
       }
       const now = performance.now();
-      if (loudMs > 700 && now - lastMsgAt > 500) {
-        const top = Object.entries(hints).sort((a, b) => b[1] - a[1])[0];
-        if (top) { lastMsgAt = now; status(top[0], 'warn'); }
+      if (j.bodyMs > 350 && now - lastMsgAt > 400) {
+        lastMsgAt = now;
+        if (j.notesOk && j.openMissing.length) {
+          const many = j.openMissing.length > 1;
+          status(`Open ${j.openMissing.join(' and ')} string${many ? 's aren\'t' : ' isn\'t'} ringing. A finger may be touching ${many ? 'them' : 'it'}.`, 'warn');
+        } else {
+          const top = Object.entries(hints).sort((a, b) => b[1] - a[1])[0];
+          if (top) status(top[0], 'warn');
+        }
       }
     }
-    let detailAt = 0;
-    function detail(f, r) {
+    let detailAt = 0, lastJudge = null;
+    function detail(f) {
       const el = $('pDetail');
       if (!S.prefs.showDetail) { el.hidden = true; return; }
       const now = performance.now();
-      if (now - detailAt < 200) return;
+      if (now - detailAt < 250) return;
       detailAt = now; el.hidden = false;
-      const opens = f.spectrum ? M.openStringCheck(f.spectrum, current) : [];
-      const parts = [`Heard ${r.heard || '?'} (match ${Math.round(r.score * 100)}%)`];
-      parts.push(r.missing.length ? `missing ${r.missing.join(', ')}` : 'all notes present');
-      if (opens.length) parts.push('open strings: ' + opens.map(o => `${o.label} ${o.ok ? '✓' : '✗'}`).join(', '));
-      parts.push(r.ok ? 'CLEAN' : 'not yet');
+      const lvl = `level ${(f.rms * 1000).toFixed(1)} / threshold ${(f.gate * 1000).toFixed(1)}`;
+      if (!f.loud) { el.textContent = `${lvl} · too quiet, not listening`; return; }
+      const j = lastJudge;
+      if (!j || !f.chroma) { el.textContent = `${lvl} · listening…`; return; }
+      const parts = [lvl, `heard ${j.r.heard || '?'} ${Math.round(j.r.score * 100)}%`];
+      parts.push(j.notesOk ? 'notes OK' : j.r.missing.length ? `missing ${j.r.missing.join(', ')}` : 'notes not steady yet');
+      if (j.opens.length) parts.push('open: ' + j.opens.map(o => `${o.label} ${(j.seen[o.label] || 0) >= 3 ? '✓' : '✗'}${o.prominence.toFixed(0)}dB`).join(', '));
       el.textContent = parts.join(' · ');
     }
     function hintFor(r) {
@@ -510,7 +542,7 @@
       run = {
         seq: S.prefs.metroSeq.slice(), order: randomOrder(S.prefs.metroSeq, S.prefs.rounds), beats, beatDur, countIn, rounds: S.prefs.rounds,
         t0: ctx.currentTime + 0.35, nextBeat: 0, results: new Array(S.prefs.rounds).fill(null),
-        hold: holdTimer(), key: seqKey(),
+        judge: strumJudge(), judgeSlot: -1, key: seqKey(),
       };
       run.total = countIn + run.rounds * beats;
       run.timer = setInterval(schedule, 25);
@@ -571,11 +603,12 @@
       const b = (f.time - LAG - run.t0) / run.beatDur - run.countIn;
       if (b < 0) return;
       const slot = Math.floor(b / run.beats);
-      if (slot >= run.rounds || run.results[slot] !== null) { run.hold.reset(); return; }
+      if (slot >= run.rounds || run.results[slot] !== null) return;
+      if (slot !== run.judgeSlot) { run.judgeSlot = slot; run.judge.reset(); }
       const chord = M.CHORD_BY_KEY[run.order[slot]];
-      const ok = isClean(f, chord);
-      if (run.hold.add(ok, f.dt) >= 200) {
-        run.results[slot] = true; run.resEls[slot].classList.add('ok'); run.hold.reset();
+      const j = run.judge.feed(f, chord);
+      if (j && j.clean) {
+        run.results[slot] = true; run.resEls[slot].classList.add('ok'); run.judge.reset();
         S.clean++; markDay();
       }
     }
@@ -635,7 +668,7 @@
     async function start() {
       if (!(await startMic())) return;
       run = {
-        a: S.prefs.pairA, b: S.prefs.pairB, expect: Math.random() < 0.5 ? 0 : 1, count: 0, hold: holdTimer(),
+        a: S.prefs.pairA, b: S.prefs.pairB, expect: Math.random() < 0.5 ? 0 : 1, count: 0, judge: strumJudge(),
         startAt: performance.now() + 3000, endAt: performance.now() + 63000,
       };
       $('oCount').textContent = '0';
@@ -655,9 +688,9 @@
     function onFrame(f) {
       if (!run || currentTab !== 'drills' || performance.now() < run.startAt) return;
       const key = run.expect ? run.b : run.a;
-      const ok = isClean(f, M.CHORD_BY_KEY[key]);
-      if (run.hold.add(ok, f.dt) >= 200) {
-        run.count++; run.expect ^= 1; run.hold.reset(); S.clean++; markDay();
+      const j = run.judge.feed(f, M.CHORD_BY_KEY[key]);
+      if (j && j.clean) {
+        run.count++; run.expect ^= 1; run.judge.reset(); S.clean++; markDay();
         $('oCount').textContent = run.count;
         setChord(run.expect ? run.b : run.a);
         const c = $('oRun'); c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');

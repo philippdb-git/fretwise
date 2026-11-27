@@ -133,7 +133,7 @@
     const lo = Math.max(2, Math.floor(minF / binHz));
     const hi = Math.min(dbSpectrum.length - 2, Math.ceil(maxF / binHz));
     const mag = i => Math.pow(10, dbSpectrum[i] / 20);
-    let peak = 0;
+    let peak = -Infinity;
     for (let i = lo; i <= hi; i++) peak = Math.max(peak, dbSpectrum[i]);
     const floorDb = peak - 45; // ignore anything far below the loudest partial
     for (let i = lo; i <= hi; i++) {
@@ -207,7 +207,7 @@
       const m = STRINGS[s].midi, f = midiToFreq(m);
       const level = bandPeakDb(db, sampleRate, fftSize, f);
       const prominence = level - localFloorDb(db, sampleRate, fftSize, f);
-      let ok = prominence >= 8;
+      let ok = prominence >= 12;
       const coveredBy = played.filter(pm => pm !== null && [12, 19, 24].includes(m - pm));
       for (const pm of coveredBy) {
         if (level < bandPeakDb(db, sampleRate, fftSize, midiToFreq(pm)) - 15) ok = false;
