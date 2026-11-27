@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F3F5F7">
+<title>Fretwise</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="7" fill="var(--accent)"/><path d="M10 9v14M16 9v14M22 9v14" stroke="#fff" stroke-width="1.6"/><path d="M8 13h16M8 18h16" stroke="#fff" stroke-opacity=".55" stroke-width="1.2"/><circle cx="16" cy="15.5" r="2.3" fill="#fff"/></svg>
+    <span>Fretwise</span>
+  </div>
+  <button id="micBtn" class="mic-pill" type="button" aria-live="polite">
+    <span class="mic-dot"></span><span id="micLabel">Start mic</span>
+    <span class="level"><span id="levelBar"></span></span>
+  </button>
+</header>
+
+<main id="app">
+  <!-- TUNER -->
+  <section id="view-tune" class="view" data-view="tune">
+    <div class="tuner card">
+      <div class="tuner-note"><span id="tNote">–</span><sub id="tOct"></sub></div>
+      <div class="meter" aria-hidden="true">
+        <div class="meter-zone"></div>
+        <div class="meter-ticks"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div id="tNeedle" class="needle"></div>
+      </div>
+      <div class="meter-scale"><span>−50</span><span>flat</span><span>0</span><span>sharp</span><span>+50</span></div>
+      <p id="tHint" class="tuner-hint">Tap <b>Start mic</b>, then pluck one string.</p>
+      <p id="tHz" class="tuner-hz">&nbsp;</p>
+    </div>
+    <div class="strings" id="tStrings" role="list" aria-label="Standard tuning"></div>
+    <p class="fine">Standard tuning, thickest to thinnest: E A D G B E. Pluck one string at a time and let it ring.</p>
+  </section>
+
+  <!-- CHORD PRACTICE -->
+  <section id="view-chords" class="view" data-view="chords" hidden>
+    <div class="section-head">
+      <h2>Chord practice</h2>
+      <button class="link-btn" id="pEdit" type="button">Choose chords</button>
+    </div>
+    <div id="pPicker" class="picker" hidden>
+      <p class="fine">Tap the chords you want in today's session.</p>
+      <div class="chips" id="pChips"></div>
+      <label class="toggle"><input type="checkbox" id="pShuffle" checked> Random order</label>
+    </div>
+    <div class="practice card">
+      <div class="practice-top">
+        <div>
+          <div class="eyebrow">Play</div>
+          <div class="chord-name" id="pName">C</div>
+          <div class="fine" id="pNote">&nbsp;</div>
+        </div>
+        <div class="diagram" id="pDiagram"></div>
+      </div>
+      <div id="pStatus" class="status">Start the mic, then strum the chord.</div>
+      <div class="notes" id="pNotes" aria-hidden="true"></div>
+      <div class="row">
+        <span class="tally">Clean: <b id="pCount">0</b></span>
+        <button class="btn ghost" id="pSkip" type="button">Next chord</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- DRILLS -->
+  <section id="view-drills" class="view" data-view="drills" hidden>
+    <div class="seg" role="tablist">
+      <button type="button" role="tab" id="segMetro" aria-selected="true">Metronome</button>
+      <button type="button" role="tab" id="segMinute" aria-selected="false">One-minute changes</button>
+    </div>
+
+    <!-- Metronome drill -->
+    <div id="metroPanel">
+      <div id="mSetup" class="card setup">
+        <p class="fine">Tap chords in the order you want to cycle through them (at least two).</p>
+        <div class="chips" id="mChips"></div>
+        <div class="seq" id="mSeq"></div>
+        <div class="controls">
+          <div class="stepper">
+            <span class="lbl">Tempo</span>
+            <button type="button" class="step" data-bpm="-5" aria-label="Slower">−</button>
+            <output id="mBpm">60</output><span class="unit">BPM</span>
+            <button type="button" class="step" data-bpm="5" aria-label="Faster">+</button>
+          </div>
+          <div class="stepper">
+            <span class="lbl">Beats per chord</span>
+            <select id="mBeats"><option>2</option><option selected>4</option><option>8</option></select>
+          </div>
+          <div class="stepper">
+            <span class="lbl">Changes</span>
+            <select id="mRounds"><option>8</option><option selected>16</option><option>32</option></select>
+          </div>
+        </div>
+        <button class="btn primary wide" id="mStart" type="button">Start drill</button>
+        <p class="fine" id="mBestLine">&nbsp;</p>
+      </div>
+      <div id="mRun" class="card run" hidden>
+        <div class="run-head"><span id="mProgress">Count-in</span><button class="btn ghost small" id="mStop" type="button">Stop</button></div>
+        <div class="run-chords">
+          <div class="now"><div class="eyebrow">Now</div><div class="chord-name huge" id="mNow">–</div></div>
+          <div class="next"><div class="eyebrow">Next</div><div class="chord-name" id="mNext">–</div><div class="diagram small" id="mNextDia"></div></div>
+        </div>
+        <div class="beats" id="mBeatDots"></div>
+        <div class="results" id="mResults"></div>
+      </div>
+      <div id="mDone" class="card done" hidden>
+        <div class="eyebrow">Drill finished</div>
+        <div class="big-stat"><span id="mScore">0</span><small>clean changes</small></div>
+        <p id="mDoneLine" class="fine"></p>
+        <div class="results" id="mDoneResults"></div>
+        <button class="btn primary wide" id="mAgain" type="button">Again</button>
+      </div>
+    </div>
+
+    <!-- One-minute drill -->
+    <div id="minutePanel" hidden>
+      <div id="oSetup" class="card setup">
+        <p class="fine">Switch between two chords as fast as you can for one minute. Each clean chord counts.</p>
+        <div class="pair">
+          <div><span class="lbl">First chord</span><div class="chips" id="oChipsA"></div></div>
+          <div><span class="lbl">Second chord</span><div class="chips" id="oChipsB"></div></div>
+        </div>
+        <button class="btn primary wide" id="oStart" type="button">Start one minute</button>
+        <p class="fine" id="oBestLine">&nbsp;</p>
+      </div>
+      <div id="oRun" class="card run" hidden>
+        <div class="run-head"><span class="timer" id="oTimer">60</span><button class="btn ghost small" id="oStop" type="button">Stop</button></div>
+        <div class="run-chords one">
+          <div class="now"><div class="eyebrow">Play</div><div class="chord-name huge" id="oNow">–</div></div>
+          <div class="diagram" id="oDia"></div>
+        </div>
+        <div class="big-stat"><span id="oCount">0</span><small>changes</small></div>
+      </div>
+      <div id="oDone" class="card done" hidden>
+        <div class="eyebrow">Time's up</div>
+        <div class="big-stat"><span id="oScore">0</span><small>changes in one minute</small></div>
+        <p id="oDoneLine" class="fine"></p>
+        <button class="btn primary wide" id="oAgain" type="button">Again</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROGRESS -->
+  <section id="view-progress" class="view" data-view="progress" hidden>
+    <div class="stats">
+      <div class="stat card"><span id="sStreak">0</span><small>day streak</small></div>
+      <div class="stat card"><span id="sDays">0</span><small>practice days</small></div>
+      <div class="stat card"><span id="sClean">0</span><small>clean chords</small></div>
+    </div>
+    <div class="card list-card">
+      <h3>One-minute bests</h3>
+      <ul id="sMinute" class="plain"></ul>
+    </div>
+    <div class="card list-card">
+      <h3>Metronome bests</h3>
+      <ul id="sMetro" class="plain"></ul>
+    </div>
+    <div class="card list-card">
+      <h3>Recent sessions</h3>
+      <ul id="sRecent" class="plain"></ul>
+    </div>
+    <div class="card list-card">
+      <h3>Settings</h3>
+      <label class="slider"><span>Mic sensitivity</span><input type="range" id="sSens" min="1" max="10" value="5"></label>
+      <p class="fine">Raise it if strums aren't picked up. Lower it if the app reacts to talking or background noise.</p>
+      <button class="btn ghost small" id="sReset" type="button">Reset progress</button>
+      <div id="sResetConfirm" class="confirm" hidden>
+        <span>Delete all saved scores and streaks?</span>
+        <button class="btn danger small" id="sResetYes" type="button">Delete</button>
+        <button class="btn ghost small" id="sResetNo" type="button">Keep</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar" aria-label="Sections">
+  <button type="button" data-tab="tune" aria-current="page"><svg viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 18l4-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Tuner</button>
+  <button type="button" data-tab="chords"><svg viewBox="0 0 24 24"><path d="M6 3v18M10 3v18M14 3v18M18 3v18M4 8h16M4 13h16" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="10.5" r="2" fill="currentColor"/><circle cx="14" cy="15.5" r="2" fill="currentColor"/></svg>Chords</button>
+  <button type="button" data-tab="drills"><svg viewBox="0 0 24 24"><path d="M8 21h8l-2.5-17h-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 15l5-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Drills</button>
+  <button type="button" data-tab="progress"><svg viewBox="0 0 24 24"><path d="M5 20V12M10 20V6M15 20v-9M20 20V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Progress</button>
+</nav>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="music.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
