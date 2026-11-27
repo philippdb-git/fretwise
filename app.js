@@ -49,7 +49,7 @@
   const Engine = {
     ctx: null, analyser: null, stream: null, src: null, running: false,
     timeBuf: null, freqBuf: null, listeners: new Set(), mode: 'pitch',
-    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0, onsetId: 0, rmsHist: [],
+    last: 0, wake: null, levels: M.createLevelTracker(),
 
     ensureCtx() {
       if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -102,10 +102,7 @@
       this.tick();
       requestAnimationFrame(() => this.loop());
     },
-    gate() {
-      const base = 0.012 * Math.pow(0.7, S.prefs.sens - 1);
-      return Math.max(base, this.noise * 3);
-    },
+    gate() { return this.levels.gate(S.prefs.sens); },
     tick() {
       const now = performance.now();
       if (now - this.last < 40) return;
@@ -117,23 +114,11 @@
       const n = 2048, off = buf.length - n;
       for (let i = off; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / n);
-      const gate = this.gate();
-      const loud = rms > gate;
-      // Noise floor = the quietest moments (5th percentile) of the last ~8 s. A steady
-      // noisy room raises the threshold; a long-ringing guitar does not, because the
-      // short gaps between strums and chord changes keep the estimate low.
-      this.rmsHist.push(rms);
-      if (this.rmsHist.length > 200) this.rmsHist.shift();
-      if (this.rmsHist.length >= 10) {
-        const sorted = [...this.rmsHist].sort((a, b) => a - b);
-        this.noise = sorted[Math.floor(sorted.length * 0.05)];
-      }
-      // A new strum: sound starts, or jumps up sharply while ringing.
-      if (loud && (this.prevRms <= gate || rms > this.prevRms * 2)) { this.onsetAt = now; this.onsetId++; }
-      this.prevRms = rms;
+      const lv = this.levels.update(rms, now, S.prefs.sens);
+      const loud = lv.loud;
       const frame = {
         time: this.ctx.currentTime, dt, rms, loud, level: Math.sqrt(clamp(rms / 0.15, 0, 1)),
-        sinceOnset: loud ? now - this.onsetAt : 0, onsetId: this.onsetId, gate,
+        sinceOnset: lv.sinceOnset, onsetId: lv.onsetId, gate: lv.gate,
       };
       if (loud && this.mode === 'chroma') {
         an.getFloatFrequencyData(this.freqBuf);
@@ -236,36 +221,10 @@
   }
   const ALL_KEYS = M.CHORDS.map(c => c.key);
 
-  // The FFT window still holds the pick attack (energy at every pitch) for a while after a strum.
-  const SETTLE_MS = 120;
-  const settled = f => f.loud && f.chroma && f.sinceOnset >= SETTLE_MS;
-
-  // Judges one strum against a chord. The notes must match for a short, mostly continuous
-  // time. Each open string only has to ring clearly at some point during the strum
-  // (in at least 3 moments, to rule out noise), not in every moment: real strums on a phone mic are
-  // uneven, and asking for every moment rejected clean chords.
+  // Per-strum chord judging lives in music.js so the offline tests run the same code.
   function strumJudge() {
-    const hold = holdTimer();
-    let seen = {}, lastOnset = -1, bodyMs = 0, notesOk = false, prevRms = 0;
-    const reset = () => { hold.reset(); seen = {}; bodyMs = 0; notesOk = false; prevRms = 0; };
-    return {
-      reset,
-      feed(f, chord) {
-        if (f.onsetId !== lastOnset) { lastOnset = f.onsetId; reset(); }
-        if (!settled(f)) return null;
-        bodyMs += f.dt;
-        const r = M.matchChord(f.chroma, chord);
-        const opens = f.spectrum ? M.openStringCheck(f.spectrum, chord) : [];
-        // Count open strings only while the sound is fading: a string still being hit
-        // (slow strum, stray brush) briefly puts energy at every pitch.
-        const fading = f.rms <= prevRms * 1.05;
-        prevRms = f.rms;
-        if (fading) opens.forEach(o => { if (o.ok) seen[o.label] = (seen[o.label] || 0) + 1; });
-        if (hold.add(r.ok, f.dt) >= 250) notesOk = true;
-        const openMissing = S.prefs.strictOpen ? opens.filter(o => (seen[o.label] || 0) < 3).map(o => o.label) : [];
-        return { r, opens, seen, notesOk, openMissing, clean: notesOk && openMissing.length === 0, bodyMs };
-      },
-    };
+    const j = M.createStrumJudge();
+    return { reset: j.reset, feed: (f, chord) => j.feed(f, chord, S.prefs.strictOpen) };
   }
 
   // Accumulates how long a condition has been (mostly) true: a single bad frame
@@ -432,9 +391,8 @@
       const now = performance.now();
       if (j.bodyMs > 350 && now - lastMsgAt > 400) {
         lastMsgAt = now;
-        if (j.notesOk && j.openMissing.length) {
-          const many = j.openMissing.length > 1;
-          status(`Open ${j.openMissing.join(' and ')} string${many ? 's aren\'t' : ' isn\'t'} ringing. A finger may be touching ${many ? 'them' : 'it'}.`, 'warn');
+        if (j.dead.length) {
+          status(stringHint(j.dead), 'warn');
         } else {
           const top = Object.entries(hints).sort((a, b) => b[1] - a[1])[0];
           if (top) status(top[0], 'warn');
@@ -442,6 +400,20 @@
       }
     }
     let detailAt = 0, lastJudge = null;
+    // Names the strings that don't ring, with what to do about each kind.
+    function stringHint(dead) {
+      const open = dead.filter(d => d.fret === 0), fretted = dead.filter(d => d.fret > 0);
+      const list = a => a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0];
+      const out = [];
+      if (fretted.length) {
+        out.push(`${list(fretted.map(d => `${d.label} string (fret ${d.fret})`))} ${fretted.length > 1 ? 'aren\'t' : 'isn\'t'} ringing clearly. Press down firmly, just behind the fret.`);
+      }
+      if (open.length) {
+        out.push(`Open ${list(open.map(d => d.label))} string${open.length > 1 ? 's aren\'t' : ' isn\'t'} ringing. A finger may be touching ${open.length > 1 ? 'them' : 'it'}.`);
+      }
+      const text = out.join(' ');
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
     function detail(f) {
       const el = $('pDetail');
       if (!S.prefs.showDetail) { el.hidden = true; return; }
@@ -454,15 +426,11 @@
       if (!j || !f.chroma) { el.textContent = `${lvl} · listening…`; return; }
       const parts = [lvl, `heard ${j.r.heard || '?'} ${Math.round(j.r.score * 100)}%`];
       parts.push(j.notesOk ? 'notes OK' : j.r.missing.length ? `missing ${j.r.missing.join(', ')}` : 'notes not steady yet');
-      if (j.opens.length) parts.push('open: ' + j.opens.map(o => `${o.label} ${(j.seen[o.label] || 0) >= 3 ? '✓' : '✗'}${o.prominence.toFixed(0)}dB`).join(', '));
+      if (j.strings.length) parts.push('strings: ' + j.strings.map(x => `${x.label}${x.fret ? '(' + x.fret + ')' : '(o)'} ${x.ok ? '✓' : '✗'}${x.median.toFixed(0)}`).join(', ') + ` dB (needs ${M.STRING_RING_DB})`);
       el.textContent = parts.join(' · ');
     }
     function hintFor(r) {
       if (r.missing.length) return `Missing ${r.missing.join(' and ')}. Check that every string rings clearly.`;
-      if (r.openMissing.length) {
-        const many = r.openMissing.length > 1;
-        return `Open ${r.openMissing.join(' and ')} string${many ? 's aren\'t' : ' isn\'t'} ringing. A finger may be touching ${many ? 'them' : 'it'}.`;
-      }
       if (r.heard && r.heard !== current.key) return `Sounds like ${r.heard}. Check your finger positions.`;
       return 'Almost. Strum again and let it ring.';
     }

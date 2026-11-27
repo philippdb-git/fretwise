@@ -12,6 +12,8 @@ the phone's browser storage. There's no account and nothing is sent anywhere.
 | `music.js` | Chord shapes, pitch detection (YIN) and chord matching (chroma) |
 | `sw.js`, `manifest.webmanifest`, `icon*` | Offline cache and "Add to Home screen" support |
 | `test/detect.test.js` | Synthetic detection tests: `node test/detect.test.js` |
+| `tools/record_takes.py` | Guided recording of real guitar takes into `recordings/` (not in git) |
+| `tools/analyze.js` | Replays `recordings/*.wav` through the app's detection: `node tools/analyze.js` |
 
 ## Getting it on your phone
 
@@ -39,11 +41,12 @@ With USB debugging on: `adb reverse tcp:8000 tcp:8000`, then open `http://localh
 - Strum once and let the chord ring. Muted or buzzing strings show up as "Missing …".
 - If strums aren't picked up, raise **Mic sensitivity** under Progress → Settings.
 - Detection is deliberately lenient. G7 also counts as G, and Fmaj7 as F.
-- Open strings must ring. Strings whose note appears nowhere else in the chord (e.g. the open G in C,
-  the open D in D) are checked reliably. Open strings doubled by a lower note's overtone (e.g. the high E
-  in C) are only flagged when clearly silent, because a phone mic can't tell them apart reliably.
-- If a chord isn't recognized, turn on **Show detection details** in Settings to see what the app hears,
-  or switch off **Require open strings to ring**.
+- With **Check that every string rings** on (default), each string of the shape must ring at its
+  exact pitch: open strings not touched by a finger, fretted strings pressed down properly. The
+  threshold (13 dB, `STRING_RING_DB` in `music.js`) leans generous on purpose.
+- Some faults can't be heard reliably: a string whose note a lower string's overtone also produces
+  (for example the open B in Em, or the high E in C) may still pass when muted.
+- If a chord isn't recognized, turn on **Show detection details** in Settings to see what the app hears.
 - Metronome drills play your chosen chords in a new random order every time (never the same chord twice in a row).
 
 ## Updating

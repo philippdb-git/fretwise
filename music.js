@@ -237,7 +237,100 @@
     return { ok, score, heard: best.name, heardScore: best.score, missing, extra, openMissing };
   }
 
+  // ---- Live analysis state (shared by the app and the offline tests) -------
+  // Tracks the noise floor, decides when sound is loud enough, and spots new strums.
+  function createLevelTracker() {
+    let noise = 0.001, prevRms = 0, onsetAt = 0, onsetId = 0, quietSince = 0, strumPeak = 0;
+    const hist = [];
+    return {
+      get noise() { return noise; },
+      gate(sens) { return Math.max(0.012 * Math.pow(0.7, sens - 1), noise * 3); },
+      update(rms, now, sens) {
+        const gate = this.gate(sens);
+        const loud = rms > gate;
+        // Noise floor = the quietest moments (5th percentile) of the last ~8 s. A steady
+        // noisy room raises the threshold; a long-ringing guitar does not, because the
+        // short gaps between strums and chord changes keep the estimate low.
+        hist.push(rms);
+        if (hist.length > 200) hist.shift();
+        if (hist.length >= 10) {
+          const sorted = [...hist].sort((a, b) => a - b);
+          noise = sorted[Math.floor(sorted.length * 0.05)];
+        }
+        // A new strum: sound starts after a real pause (not a flicker around the threshold
+        // as a strum fades), or jumps sharply to near the last strum's peak while ringing.
+        if (!loud) { if (!quietSince) quietSince = now; }
+        const pausedLongEnough = quietSince && now - quietSince >= 150;
+        if (loud && (pausedLongEnough || onsetId === 0 || (rms > prevRms * 2 && rms > strumPeak * 0.5))) {
+          onsetAt = now; onsetId++; strumPeak = 0;
+        }
+        if (loud) { quietSince = 0; strumPeak = Math.max(strumPeak, rms); }
+        prevRms = rms;
+        return { loud, gate, sinceOnset: loud ? now - onsetAt : 0, onsetId };
+      },
+    };
+  }
+
+  // The FFT window still holds the pick attack (energy at every pitch) for a while after a strum.
+  const SETTLE_MS = 120;
+  // A string rings when its pitch stands this far (median over the strum) above the nearby
+  // spectrum. Tuned on 36 real recordings (tools/analyze.js): clean strings ended around
+  // 21 dB or more but can sit near 16 dB early in a strum; muted or unpressed strings were
+  // mostly 0–15 dB. 13 dB is on the generous side on purpose: phone mics hear less bass than
+  // the test mic, and rejecting a clean chord is worse than letting a slightly faulty one through.
+  const STRING_RING_DB = 13;
+  const MIN_BODY_FRAMES = 5;
+
+  // Prominence of each played string's exact pitch in one spectrum.
+  function stringProminences(spectrum, chord) {
+    const { db, sampleRate, fftSize } = spectrum;
+    const out = [];
+    chord.frets.forEach((fr, s) => {
+      if (fr < 0) return;
+      const f = midiToFreq(STRINGS[s].midi + fr);
+      out.push({ string: s, fret: fr, prominence: bandPeakDb(db, sampleRate, fftSize, f) - localFloorDb(db, sampleRate, fftSize, f) });
+    });
+    return out;
+  }
+  const median = a => { const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
+
+  // Judges one strum against a chord.
+  // - Notes: the chord's notes must match for a short, mostly continuous time (a single
+  //   bad moment takes time off instead of starting over).
+  // - Strings (when checkStrings is on): every string of the shape, open or fretted, must
+  //   ring at its exact pitch, judged by the median over the body of the strum (frames at
+  //   least 30% as loud as the strum's peak), so one loud moment or one dip doesn't decide.
+  // frame: {loud, chroma, spectrum, rms, dt, sinceOnset, onsetId}
+  function createStrumJudge() {
+    let holdMs = 0, lastOnset = -1, bodyMs = 0, notesOk = false, peak = 0, proms = {};
+    const reset = () => { holdMs = 0; bodyMs = 0; notesOk = false; peak = 0; proms = {}; };
+    return {
+      reset,
+      feed(f, chord, checkStrings = true) {
+        if (f.onsetId !== lastOnset) { lastOnset = f.onsetId; reset(); }
+        if (!(f.loud && f.chroma && f.sinceOnset >= SETTLE_MS)) return null;
+        bodyMs += f.dt;
+        peak = Math.max(peak, f.rms);
+        const r = matchChord(f.chroma, chord);
+        holdMs = r.ok ? holdMs + f.dt : Math.max(0, holdMs - f.dt);
+        if (holdMs >= 250) notesOk = true;
+        if (f.spectrum && f.rms >= peak * 0.3) {
+          stringProminences(f.spectrum, chord).forEach(p => { (proms[p.string] = proms[p.string] || []).push(p.prominence); });
+        }
+        const strings = Object.entries(proms).map(([s, a]) => {
+          const m = median(a);
+          return { string: +s, fret: chord.frets[s], label: STRING_LABELS[s], median: m, frames: a.length, ok: m >= STRING_RING_DB };
+        });
+        const enough = strings.length > 0 && strings.every(x => x.frames >= MIN_BODY_FRAMES);
+        const dead = checkStrings && enough ? strings.filter(x => !x.ok) : [];
+        const stringsOk = !checkStrings || (enough && dead.length === 0);
+        return { r, notesOk, strings, dead, enough, clean: notesOk && stringsOk, bodyMs };
+      },
+    };
+  }
+
   const api = {
+    createLevelTracker, createStrumJudge, SETTLE_MS, STRING_RING_DB, bandPeakDb, localFloorDb, stringProminences,
     NOTE_NAMES, STRINGS, CHORDS, CHORD_BY_KEY, LIBRARY, INTERVALS,
     chordTones, midiToFreq, freqToMidi, pitchClass, chordNotesMidi,
     yin, describePitch, chromaFromSpectrum, cosine, matchChord, openStringCheck, STRING_LABELS,
