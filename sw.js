@@ -1,5 +1,5 @@
 // Offline cache. Bump VERSION when app files change so phones pick up the update.
-const VERSION = 'fretwise-v2';
+const VERSION = 'fretwise-v3';
 const FILES = ['./', 'index.html', 'app.css', 'app.js', 'music.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

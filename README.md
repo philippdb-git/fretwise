@@ -39,8 +39,11 @@ With USB debugging on: `adb reverse tcp:8000 tcp:8000`, then open `http://localh
 - Strum once and let the chord ring. Muted or buzzing strings show up as "Missing …".
 - If strums aren't picked up, raise **Mic sensitivity** under Progress → Settings.
 - Detection is deliberately lenient. G7 also counts as G, and Fmaj7 as F.
-- Every open string in a chord shape must ring (checked string by string at its exact pitch).
-  If clean chords keep getting rejected, switch off **Require open strings to ring** in Settings.
+- Open strings must ring. Strings whose note appears nowhere else in the chord (e.g. the open G in C,
+  the open D in D) are checked reliably. Open strings doubled by a lower note's overtone (e.g. the high E
+  in C) are only flagged when clearly silent, because a phone mic can't tell them apart reliably.
+- If a chord isn't recognized, turn on **Show detection details** in Settings to see what the app hears,
+  or switch off **Require open strings to ring**.
 - Metronome drills play your chosen chords in a new random order every time (never the same chord twice in a row).
 
 ## Updating

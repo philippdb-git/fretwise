@@ -12,7 +12,7 @@
     prefs: {
       practice: ['C', 'G', 'D', 'Em', 'Am'], shuffle: true,
       metroSeq: ['G', 'C', 'D'], bpm: 60, beats: 4, rounds: 16,
-      pairA: 'C', pairB: 'G', sens: 5, strictOpen: true,
+      pairA: 'C', pairB: 'G', sens: 5, strictOpen: true, showDetail: false,
     },
   });
   function load() {
@@ -49,7 +49,7 @@
   const Engine = {
     ctx: null, analyser: null, stream: null, src: null, running: false,
     timeBuf: null, freqBuf: null, listeners: new Set(), mode: 'pitch',
-    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0,
+    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0, rmsHist: [],
 
     ensureCtx() {
       if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -119,9 +119,16 @@
       const rms = Math.sqrt(sum / n);
       const gate = this.gate();
       const loud = rms > gate;
-      if (!loud) this.noise = this.noise * 0.97 + rms * 0.03;
+      // Noise floor = the quiet end (10th percentile) of the last ~5 s. A steady noisy
+      // room raises the threshold instead of counting as one endless strum.
+      this.rmsHist.push(rms);
+      if (this.rmsHist.length > 125) this.rmsHist.shift();
+      if (this.rmsHist.length >= 10) {
+        const sorted = [...this.rmsHist].sort((a, b) => a - b);
+        this.noise = sorted[Math.floor(sorted.length * 0.1)];
+      }
       // A new strum: sound starts, or jumps up sharply while ringing.
-      if (loud && (this.prevRms <= gate || rms > this.prevRms * 1.6)) this.onsetAt = now;
+      if (loud && (this.prevRms <= gate || rms > this.prevRms * 2)) this.onsetAt = now;
       this.prevRms = rms;
       const frame = {
         time: this.ctx.currentTime, dt, rms, loud, level: Math.sqrt(clamp(rms / 0.15, 0, 1)),
@@ -233,14 +240,15 @@
     return M.matchChord(f.chroma, chord, S.prefs.strictOpen ? f.spectrum : undefined);
   }
   // The FFT window still holds the pick attack (energy at every pitch) for a while after a strum.
-  const SETTLE_MS = 250;
+  const SETTLE_MS = 120;
   const settled = f => f.loud && f.chroma && f.sinceOnset >= SETTLE_MS;
   const isClean = (f, chord) => !!(settled(f) && check(f, chord).ok);
 
-  // Accumulates how long a condition has been continuously true.
+  // Accumulates how long a condition has been (mostly) true: a single bad frame
+  // takes time off instead of starting over, so real, slightly noisy strums still count.
   function holdTimer() {
     let ms = 0;
-    return { add(ok, dt) { ms = ok ? ms + dt : 0; return ms; }, reset() { ms = 0; } };
+    return { add(ok, dt) { ms = ok ? ms + dt : Math.max(0, ms - dt); return ms; }, reset() { ms = 0; } };
   }
 
   // ---------------------------------------------------------------- tabs
@@ -350,7 +358,7 @@
       $('pDiagram').innerHTML = diagram(current);
       const shape = new Set(M.chordNotesMidi(current).map(M.pitchClass));
       cols.forEach((c, i) => c.classList.toggle('tone', shape.has(i)));
-      locked = false; hold.reset(); loudMs = 0;
+      locked = false; hold.reset(); loudMs = 0; peak = 0; hints = {}; lastMsgAt = 0;
       status(Engine.running ? 'Strum the chord and let it ring.' : 'Start the mic, then strum the chord.');
     }
     function next() {
@@ -379,9 +387,10 @@
       }
       loudMs += f.dt;
       peak = Math.max(peak, f.rms);
-      if (!settled(f)) { hold.reset(); return; }
+      if (!settled(f)) return;
       const r = check(f, current);
-      if (hold.add(r.ok, f.dt) >= 300) {
+      if (f.rms >= peak * 0.3) detail(f, r);
+      if (hold.add(r.ok, f.dt) >= 250) {
         locked = true; count++; S.clean++; save(); markDay();
         $('pCount').textContent = count;
         status(`Clean ${current.key}!`, 'good');
@@ -401,6 +410,20 @@
         const top = Object.entries(hints).sort((a, b) => b[1] - a[1])[0];
         if (top) { lastMsgAt = now; status(top[0], 'warn'); }
       }
+    }
+    let detailAt = 0;
+    function detail(f, r) {
+      const el = $('pDetail');
+      if (!S.prefs.showDetail) { el.hidden = true; return; }
+      const now = performance.now();
+      if (now - detailAt < 200) return;
+      detailAt = now; el.hidden = false;
+      const opens = f.spectrum ? M.openStringCheck(f.spectrum, current) : [];
+      const parts = [`Heard ${r.heard || '?'} (match ${Math.round(r.score * 100)}%)`];
+      parts.push(r.missing.length ? `missing ${r.missing.join(', ')}` : 'all notes present');
+      if (opens.length) parts.push('open strings: ' + opens.map(o => `${o.label} ${o.ok ? '✓' : '✗'}`).join(', '));
+      parts.push(r.ok ? 'CLEAN' : 'not yet');
+      el.textContent = parts.join(' · ');
     }
     function hintFor(r) {
       if (r.missing.length) return `Missing ${r.missing.join(' and ')}. Check that every string rings clearly.`;
@@ -692,9 +715,11 @@
     list($('sRecent'), S.recent.map(r => [r.text, ago(r.at)]), 'Nothing yet. Go play!');
     $('sSens').value = S.prefs.sens;
     $('sStrict').checked = S.prefs.strictOpen;
+    $('sDetail').checked = S.prefs.showDetail;
   };
   $('sSens').addEventListener('input', e => { S.prefs.sens = +e.target.value; save(); });
   $('sStrict').addEventListener('change', e => { S.prefs.strictOpen = e.target.checked; save(); });
+  $('sDetail').addEventListener('change', e => { S.prefs.showDetail = e.target.checked; save(); if (!e.target.checked) $('pDetail').hidden = true; });
   $('sReset').addEventListener('click', () => { $('sResetConfirm').hidden = false; });
   $('sResetNo').addEventListener('click', () => { $('sResetConfirm').hidden = true; });
   $('sResetYes').addEventListener('click', () => {
@@ -711,7 +736,7 @@
       start: () => Engine.start(true),
       chord(key) { pluck(M.chordNotesMidi(M.CHORD_BY_KEY[key]).map(M.midiToFreq), { dest: Engine.analyser, gain: 0.6, dur: 3 }); },
       note(freq) { pluck([freq], { dest: Engine.analyser, gain: 0.5, dur: 3 }); },
-      frets(frets) { pluck(frets.map((f, i) => (f < 0 ? null : M.midiToFreq(M.STRINGS[i].midi + f))).filter(Boolean), { dest: Engine.analyser, gain: 0.6, dur: 3 }); },
+      frets(frets, dest) { pluck(frets.map((f, i) => (f < 0 ? null : M.midiToFreq(M.STRINGS[i].midi + f))).filter(Boolean), { dest: dest || Engine.analyser, gain: 0.6, dur: 3 }); },
     };
   }
 

@@ -135,6 +135,7 @@ h3 { font-size: 1rem; margin: 0 0 8px; }
 .note-col.tone .note-bar { background: var(--accent); }
 .note-col span { font-size: .66rem; font-weight: 700; color: var(--muted); }
 .note-col.tone span { color: var(--accent); }
+.detail { margin: 0; font: 600 .78rem/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--muted); background: var(--bg); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
 .tally { font-weight: 600; color: var(--muted); }
 .tally b { color: var(--ink); font-size: 1.2rem; }
 .flash { animation: flash .6s ease-out; }

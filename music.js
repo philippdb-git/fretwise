@@ -179,28 +179,40 @@
     return p;
   }
 
-  // Checks each open string of the shape at its exact pitch (octave matters,
-  // unlike chroma). A string is "covered" when a lower note in the chord has a
-  // harmonic at the same frequency (e.g. open G3 over a fretted G2); then it
-  // must be within 5 dB of that lower note's fundamental.
+  // Median dB in the bands 1–2.5 semitones either side of f: the local "floor".
+  function localFloorDb(db, sampleRate, fftSize, f) {
+    const binHz = sampleRate / fftSize, vals = [];
+    for (const [a, b] of [[-2.5, -1], [1, 2.5]]) {
+      const lo = Math.floor(f * Math.pow(2, a / 12) / binHz), hi = Math.ceil(f * Math.pow(2, b / 12) / binHz);
+      for (let i = Math.max(1, lo); i <= hi && i < db.length; i++) vals.push(db[i]);
+    }
+    vals.sort((x, y) => x - y);
+    return vals.length ? vals[Math.floor(vals.length / 2)] : -Infinity;
+  }
+
+  // Checks each open string of the shape at its exact pitch (octave matters, unlike chroma).
+  // Tuned to be forgiving with real guitars and phone mics:
+  // - A string counts as ringing when its pitch stands out as a clear peak above the
+  //   nearby spectrum (phone mics hear little of the low E's 82 Hz, so absolute level
+  //   against the loudest note is not used).
+  // - A "covered" string (a lower note in the chord has an overtone at the same pitch,
+  //   e.g. the open high E over a fretted E in C) cannot be told apart reliably; it is
+  //   only flagged when it is far quieter than that lower note.
   function openStringCheck(spectrum, chord) {
     const { db, sampleRate, fftSize } = spectrum;
-    let ref = -Infinity;
-    const binHz = sampleRate / fftSize;
-    for (let i = Math.floor(75 / binHz); i <= Math.ceil(1050 / binHz) && i < db.length; i++) ref = Math.max(ref, db[i]);
     const played = chord.frets.map((fr, s) => (fr < 0 ? null : STRINGS[s].midi + fr));
     const out = [];
     chord.frets.forEach((fr, s) => {
       if (fr !== 0) return;
       const m = STRINGS[s].midi, f = midiToFreq(m);
       const level = bandPeakDb(db, sampleRate, fftSize, f);
-      let ok = level >= ref - 28;
-      // lower notes whose harmonics land on this string's pitch (octave, octave+fifth, two octaves)
+      const prominence = level - localFloorDb(db, sampleRate, fftSize, f);
+      let ok = prominence >= 8;
       const coveredBy = played.filter(pm => pm !== null && [12, 19, 24].includes(m - pm));
       for (const pm of coveredBy) {
-        if (level < bandPeakDb(db, sampleRate, fftSize, midiToFreq(pm)) - 5) ok = false;
+        if (level < bandPeakDb(db, sampleRate, fftSize, midiToFreq(pm)) - 15) ok = false;
       }
-      out.push({ string: s, label: STRING_LABELS[s], ok, covered: coveredBy.length > 0 });
+      out.push({ string: s, label: STRING_LABELS[s], ok, covered: coveredBy.length > 0, prominence });
     });
     return out;
   }
