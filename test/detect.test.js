@@ -53,5 +53,28 @@ for (const played of M.CHORDS) {
 const cBroken = M.chordNotesMidi({ ...M.CHORD_BY_KEY.C, frets: [-1, 3, 2, -1, 1, -1] });
 const r = M.matchChord(M.chromaFromSpectrum(fftDb(pluck(cBroken.map(M.midiToFreq), N)), SR, N), M.CHORD_BY_KEY.C);
 console.log(`info C with G+e muted -> ok=${r.ok} missing [${r.missing}]`);
+
+// Open strings: full shape must pass with spectrum; each muted open string must fail.
+console.log('\nOpen-string checks');
+let caught = 0, total = 0;
+for (const chord of M.CHORDS) {
+  const play = frets => {
+    const notes = frets.map((f, i) => f < 0 ? null : M.STRINGS[i].midi + f).filter(x => x !== null);
+    const db = fftDb(pluck(notes.map(M.midiToFreq), N, chord.key.length * 7 + 3));
+    return M.matchChord(M.chromaFromSpectrum(db, SR, N), chord, { db, sampleRate: SR, fftSize: N });
+  };
+  const full = play(chord.frets);
+  if (!full.ok) { fail++; console.log(`FAIL ${chord.key} full shape rejected: open missing [${full.openMissing}] missing [${full.missing}]`); }
+  const res = [];
+  chord.frets.forEach((f, s) => {
+    if (f !== 0) return;
+    total++;
+    const r = play(chord.frets.map((x, i) => i === s ? -1 : x));
+    if (!r.ok) caught++;
+    res.push(`${M.STRING_LABELS[s]}:${r.ok ? 'MISSED' : 'caught'}`);
+  });
+  console.log(`${full.ok ? 'ok  ' : 'FAIL'} ${chord.key.padEnd(6)} ${res.join('  ') || '(no open strings)'}`);
+}
+console.log(`muted open strings caught: ${caught}/${total}`);
 console.log(`\n${fail ? fail + ' failures' : 'all passed'}; wrong-chord accepts: ${wrongAccepts}`);
 process.exit(fail ? 1 : 0);

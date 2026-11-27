@@ -12,7 +12,7 @@
     prefs: {
       practice: ['C', 'G', 'D', 'Em', 'Am'], shuffle: true,
       metroSeq: ['G', 'C', 'D'], bpm: 60, beats: 4, rounds: 16,
-      pairA: 'C', pairB: 'G', sens: 5,
+      pairA: 'C', pairB: 'G', sens: 5, strictOpen: true,
     },
   });
   function load() {
@@ -49,7 +49,7 @@
   const Engine = {
     ctx: null, analyser: null, stream: null, src: null, running: false,
     timeBuf: null, freqBuf: null, listeners: new Set(), mode: 'pitch',
-    noise: 0.001, last: 0, wake: null,
+    noise: 0.001, last: 0, wake: null, prevRms: 0, onsetAt: 0,
 
     ensureCtx() {
       if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -120,10 +120,17 @@
       const gate = this.gate();
       const loud = rms > gate;
       if (!loud) this.noise = this.noise * 0.97 + rms * 0.03;
-      const frame = { time: this.ctx.currentTime, dt, rms, loud, level: Math.sqrt(clamp(rms / 0.15, 0, 1)) };
+      // A new strum: sound starts, or jumps up sharply while ringing.
+      if (loud && (this.prevRms <= gate || rms > this.prevRms * 1.6)) this.onsetAt = now;
+      this.prevRms = rms;
+      const frame = {
+        time: this.ctx.currentTime, dt, rms, loud, level: Math.sqrt(clamp(rms / 0.15, 0, 1)),
+        sinceOnset: loud ? now - this.onsetAt : 0,
+      };
       if (loud && this.mode === 'chroma') {
         an.getFloatFrequencyData(this.freqBuf);
         frame.chroma = M.chromaFromSpectrum(this.freqBuf, sr, an.fftSize);
+        frame.spectrum = { db: this.freqBuf, sampleRate: sr, fftSize: an.fftSize };
       }
       if (loud && this.mode === 'pitch') {
         frame.pitch = M.yin(buf.subarray(buf.length - 2848), sr);
@@ -221,6 +228,15 @@
   }
   const ALL_KEYS = M.CHORDS.map(c => c.key);
 
+  // Chord check for a frame; open strings are required unless switched off in Settings.
+  function check(f, chord) {
+    return M.matchChord(f.chroma, chord, S.prefs.strictOpen ? f.spectrum : undefined);
+  }
+  // The FFT window still holds the pick attack (energy at every pitch) for a while after a strum.
+  const SETTLE_MS = 250;
+  const settled = f => f.loud && f.chroma && f.sinceOnset >= SETTLE_MS;
+  const isClean = (f, chord) => !!(settled(f) && check(f, chord).ok);
+
   // Accumulates how long a condition has been continuously true.
   function holdTimer() {
     let ms = 0;
@@ -301,7 +317,7 @@
 
   // ---------------------------------------------------------------- chord practice
   const Practice = (() => {
-    let current = null, count = 0, locked = false, loudMs = 0, lastMsgAt = 0, order = 0;
+    let current = null, count = 0, locked = false, loudMs = 0, lastMsgAt = 0, order = 0, peak = 0, hints = {};
     const hold = holdTimer();
     const cols = [];
     M.NOTE_NAMES.forEach(n => {
@@ -358,11 +374,13 @@
       });
       if (locked) return;
       if (!f.loud || !f.chroma) {
-        hold.reset(); loudMs = 0;
+        hold.reset(); loudMs = 0; peak = 0; hints = {};
         return;
       }
       loudMs += f.dt;
-      const r = M.matchChord(f.chroma, current);
+      peak = Math.max(peak, f.rms);
+      if (!settled(f)) { hold.reset(); return; }
+      const r = check(f, current);
       if (hold.add(r.ok, f.dt) >= 300) {
         locked = true; count++; S.clean++; save(); markDay();
         $('pCount').textContent = count;
@@ -372,13 +390,26 @@
         setTimeout(next, 1100);
         return;
       }
-      const now = performance.now();
-      if (!r.ok && loudMs > 700 && now - lastMsgAt > 500) {
-        lastMsgAt = now;
-        if (r.missing.length) status(`Missing ${r.missing.join(' and ')}. Check that every string rings clearly.`, 'warn');
-        else if (r.heard && r.heard !== current.key) status(`Sounds like ${r.heard}. Check your finger positions.`, 'warn');
-        else status('Almost. Strum again and let it ring.', 'warn');
+      // Collect hints only from the body of the strum (not the attack or the fading tail),
+      // then show the most common one.
+      if (!r.ok && f.rms >= peak * 0.3) {
+        const h = hintFor(r);
+        hints[h] = (hints[h] || 0) + 1;
       }
+      const now = performance.now();
+      if (loudMs > 700 && now - lastMsgAt > 500) {
+        const top = Object.entries(hints).sort((a, b) => b[1] - a[1])[0];
+        if (top) { lastMsgAt = now; status(top[0], 'warn'); }
+      }
+    }
+    function hintFor(r) {
+      if (r.missing.length) return `Missing ${r.missing.join(' and ')}. Check that every string rings clearly.`;
+      if (r.openMissing.length) {
+        const many = r.openMissing.length > 1;
+        return `Open ${r.openMissing.join(' and ')} string${many ? 's aren\'t' : ' isn\'t'} ringing. A finger may be touching ${many ? 'them' : 'it'}.`;
+      }
+      if (r.heard && r.heard !== current.key) return `Sounds like ${r.heard}. Check your finger positions.`;
+      return 'Almost. Strum again and let it ring.';
     }
     Engine.listeners.add(onFrame);
     tabHandlers.chords = () => {
@@ -412,7 +443,16 @@
   // ---------------------------------------------------------------- metronome drill
   const Metro = (() => {
     let run = null;
-    function seqKey() { return S.prefs.metroSeq.join(' → ') + ` @ ${S.prefs.bpm}`; }
+    function seqKey() { return [...S.prefs.metroSeq].sort().join(' · ') + ` @ ${S.prefs.bpm}`; }
+    // A fresh random order for every drill: random first chord, never the same chord twice in a row.
+    function randomOrder(set, n) {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const options = set.filter(k => k !== out[i - 1]);
+        out.push(options[Math.floor(Math.random() * options.length)]);
+      }
+      return out;
+    }
     function renderSetup() {
       chips($('mChips'), ALL_KEYS, k => S.prefs.metroSeq.includes(k), k => {
         const s = S.prefs.metroSeq;
@@ -421,10 +461,10 @@
       });
       $('mSeq').innerHTML = '';
       S.prefs.metroSeq.forEach((k, i) => {
-        if (i) { const a = document.createElement('span'); a.className = 'arrow'; a.textContent = '→'; $('mSeq').appendChild(a); }
+        if (i) { const a = document.createElement('span'); a.className = 'arrow'; a.textContent = '·'; $('mSeq').appendChild(a); }
         const b = document.createElement('span'); b.textContent = k; $('mSeq').appendChild(b);
       });
-      if (S.prefs.metroSeq.length) { const a = document.createElement('span'); a.className = 'arrow'; a.textContent = '↺'; $('mSeq').appendChild(a); }
+      if (S.prefs.metroSeq.length) { const a = document.createElement('span'); a.className = 'arrow'; a.textContent = '(random order)'; $('mSeq').appendChild(a); }
       $('mBpm').textContent = S.prefs.bpm;
       $('mBeats').value = String(S.prefs.beats);
       $('mRounds').value = String(S.prefs.rounds);
@@ -445,7 +485,7 @@
       const ctx = Engine.ctx, beatDur = 60 / S.prefs.bpm, beats = S.prefs.beats;
       const countIn = Math.max(4, beats);
       run = {
-        seq: S.prefs.metroSeq.slice(), beats, beatDur, countIn, rounds: S.prefs.rounds,
+        seq: S.prefs.metroSeq.slice(), order: randomOrder(S.prefs.metroSeq, S.prefs.rounds), beats, beatDur, countIn, rounds: S.prefs.rounds,
         t0: ctx.currentTime + 0.35, nextBeat: 0, results: new Array(S.prefs.rounds).fill(null),
         hold: holdTimer(), key: seqKey(),
       };
@@ -456,7 +496,7 @@
       for (let i = 0; i < beats; i++) { const d = document.createElement('div'); d.className = 'beat' + (i === 0 ? ' first' : ''); $('mBeatDots').appendChild(d); }
       $('mResults').innerHTML = '';
       run.resEls = run.results.map((_, i) => {
-        const e = document.createElement('div'); e.className = 'res'; e.textContent = run.seq[i % run.seq.length];
+        const e = document.createElement('div'); e.className = 'res'; e.textContent = run.order[i];
         $('mResults').appendChild(e); return e;
       });
       panel('run');
@@ -478,7 +518,7 @@
       const inCount = b < run.countIn;
       const slot = Math.floor((b - run.countIn) / run.beats);
       const beatInBar = inCount ? Math.floor(Math.max(0, b)) % run.beats : Math.floor(b - run.countIn) % run.beats;
-      const chordAt = s => run.seq[((s % run.seq.length) + run.seq.length) % run.seq.length];
+      const chordAt = s => run.order[clamp(s, 0, run.rounds - 1)];
       if (inCount) {
         $('mProgress').textContent = `Get ready… ${Math.max(1, Math.ceil(run.countIn - b))}`;
         $('mNow').textContent = chordAt(0); $('mNext').textContent = chordAt(1);
@@ -509,8 +549,8 @@
       if (b < 0) return;
       const slot = Math.floor(b / run.beats);
       if (slot >= run.rounds || run.results[slot] !== null) { run.hold.reset(); return; }
-      const chord = M.CHORD_BY_KEY[run.seq[slot % run.seq.length]];
-      const ok = !!(f.loud && f.chroma && M.matchChord(f.chroma, chord).ok);
+      const chord = M.CHORD_BY_KEY[run.order[slot]];
+      const ok = isClean(f, chord);
       if (run.hold.add(ok, f.dt) >= 200) {
         run.results[slot] = true; run.resEls[slot].classList.add('ok'); run.hold.reset();
         S.clean++; markDay();
@@ -531,7 +571,7 @@
         (score / r.rounds >= 0.85 ? ' Try 5 BPM faster next time.' : score / r.rounds < 0.5 ? ' Try 5–10 BPM slower.' : '');
       $('mDoneResults').innerHTML = '';
       r.results.forEach((ok, i) => {
-        const e = document.createElement('div'); e.className = 'res ' + (ok ? 'ok' : 'miss'); e.textContent = r.seq[i % r.seq.length];
+        const e = document.createElement('div'); e.className = 'res ' + (ok ? 'ok' : 'miss'); e.textContent = r.order[i];
         $('mDoneResults').appendChild(e);
       });
       panel('done');
@@ -572,11 +612,11 @@
     async function start() {
       if (!(await startMic())) return;
       run = {
-        a: S.prefs.pairA, b: S.prefs.pairB, expect: 0, count: 0, hold: holdTimer(),
+        a: S.prefs.pairA, b: S.prefs.pairB, expect: Math.random() < 0.5 ? 0 : 1, count: 0, hold: holdTimer(),
         startAt: performance.now() + 3000, endAt: performance.now() + 63000,
       };
       $('oCount').textContent = '0';
-      setChord(run.a);
+      setChord(run.expect ? run.b : run.a);
       panel('run');
       run.raf = requestAnimationFrame(draw);
     }
@@ -592,7 +632,7 @@
     function onFrame(f) {
       if (!run || currentTab !== 'drills' || performance.now() < run.startAt) return;
       const key = run.expect ? run.b : run.a;
-      const ok = !!(f.loud && f.chroma && M.matchChord(f.chroma, M.CHORD_BY_KEY[key]).ok);
+      const ok = isClean(f, M.CHORD_BY_KEY[key]);
       if (run.hold.add(ok, f.dt) >= 200) {
         run.count++; run.expect ^= 1; run.hold.reset(); S.clean++; markDay();
         $('oCount').textContent = run.count;
@@ -651,8 +691,10 @@
     list($('sMetro'), Object.entries(S.metro).map(([k, v]) => [`${k} BPM: ${v.score}/${v.of}`, ago(v.at)]), 'No metronome drills yet.');
     list($('sRecent'), S.recent.map(r => [r.text, ago(r.at)]), 'Nothing yet. Go play!');
     $('sSens').value = S.prefs.sens;
+    $('sStrict').checked = S.prefs.strictOpen;
   };
   $('sSens').addEventListener('input', e => { S.prefs.sens = +e.target.value; save(); });
+  $('sStrict').addEventListener('change', e => { S.prefs.strictOpen = e.target.checked; save(); });
   $('sReset').addEventListener('click', () => { $('sResetConfirm').hidden = false; });
   $('sResetNo').addEventListener('click', () => { $('sResetConfirm').hidden = true; });
   $('sResetYes').addEventListener('click', () => {
@@ -669,6 +711,7 @@
       start: () => Engine.start(true),
       chord(key) { pluck(M.chordNotesMidi(M.CHORD_BY_KEY[key]).map(M.midiToFreq), { dest: Engine.analyser, gain: 0.6, dur: 3 }); },
       note(freq) { pluck([freq], { dest: Engine.analyser, gain: 0.5, dur: 3 }); },
+      frets(frets) { pluck(frets.map((f, i) => (f < 0 ? null : M.midiToFreq(M.STRINGS[i].midi + f))).filter(Boolean), { dest: Engine.analyser, gain: 0.6, dur: 3 }); },
     };
   }
 

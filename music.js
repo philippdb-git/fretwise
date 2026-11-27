@@ -165,8 +165,49 @@
     return dot / (Math.sqrt(norm) * Math.sqrt(tones.length));
   }
 
+  const STRING_LABELS = ['low E', 'A', 'D', 'G', 'B', 'high E'];
+
+  // Loudest dB value within ±cents of f.
+  function bandPeakDb(db, sampleRate, fftSize, f, cents = 45) {
+    const binHz = sampleRate / fftSize;
+    const r = Math.pow(2, cents / 1200);
+    let lo = Math.floor(f / r / binHz), hi = Math.ceil(f * r / binHz);
+    lo = Math.max(1, Math.min(lo, Math.round(f / binHz) - 1));
+    hi = Math.min(db.length - 1, Math.max(hi, Math.round(f / binHz) + 1));
+    let p = -Infinity;
+    for (let i = lo; i <= hi; i++) p = Math.max(p, db[i]);
+    return p;
+  }
+
+  // Checks each open string of the shape at its exact pitch (octave matters,
+  // unlike chroma). A string is "covered" when a lower note in the chord has a
+  // harmonic at the same frequency (e.g. open G3 over a fretted G2); then it
+  // must be within 5 dB of that lower note's fundamental.
+  function openStringCheck(spectrum, chord) {
+    const { db, sampleRate, fftSize } = spectrum;
+    let ref = -Infinity;
+    const binHz = sampleRate / fftSize;
+    for (let i = Math.floor(75 / binHz); i <= Math.ceil(1050 / binHz) && i < db.length; i++) ref = Math.max(ref, db[i]);
+    const played = chord.frets.map((fr, s) => (fr < 0 ? null : STRINGS[s].midi + fr));
+    const out = [];
+    chord.frets.forEach((fr, s) => {
+      if (fr !== 0) return;
+      const m = STRINGS[s].midi, f = midiToFreq(m);
+      const level = bandPeakDb(db, sampleRate, fftSize, f);
+      let ok = level >= ref - 28;
+      // lower notes whose harmonics land on this string's pitch (octave, octave+fifth, two octaves)
+      const coveredBy = played.filter(pm => pm !== null && [12, 19, 24].includes(m - pm));
+      for (const pm of coveredBy) {
+        if (level < bandPeakDb(db, sampleRate, fftSize, midiToFreq(pm)) - 5) ok = false;
+      }
+      out.push({ string: s, label: STRING_LABELS[s], ok, covered: coveredBy.length > 0 });
+    });
+    return out;
+  }
+
   // Lenient check: is the target chord the best (or near-best) explanation?
-  function matchChord(chroma, chord) {
+  // With `spectrum` ({db, sampleRate, fftSize}) every open string is also required.
+  function matchChord(chroma, chord, spectrum) {
     const tones = chordTones(chord);
     const score = cosine(chroma, tones);
     let best = { name: null, score: -1 };
@@ -179,14 +220,15 @@
     const missing = shapeTones.filter(t => chroma[t] < 0.18).map(t => NOTE_NAMES[t]);
     const extra = [];
     for (let k = 0; k < 12; k++) if (!tones.includes(k) && chroma[k] > 0.55) extra.push(NOTE_NAMES[k]);
-    const ok = score >= 0.78 && score >= best.score - 0.04 && missing.length === 0;
-    return { ok, score, heard: best.name, heardScore: best.score, missing, extra };
+    const openMissing = spectrum ? openStringCheck(spectrum, chord).filter(o => !o.ok).map(o => o.label) : [];
+    const ok = score >= 0.78 && score >= best.score - 0.04 && missing.length === 0 && openMissing.length === 0;
+    return { ok, score, heard: best.name, heardScore: best.score, missing, extra, openMissing };
   }
 
   const api = {
     NOTE_NAMES, STRINGS, CHORDS, CHORD_BY_KEY, LIBRARY, INTERVALS,
     chordTones, midiToFreq, freqToMidi, pitchClass, chordNotesMidi,
-    yin, describePitch, chromaFromSpectrum, cosine, matchChord,
+    yin, describePitch, chromaFromSpectrum, cosine, matchChord, openStringCheck, STRING_LABELS,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Music = api;

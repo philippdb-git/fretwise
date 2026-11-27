@@ -79,7 +79,7 @@
     <!-- Metronome drill -->
     <div id="metroPanel">
       <div id="mSetup" class="card setup">
-        <p class="fine">Tap chords in the order you want to cycle through them (at least two).</p>
+        <p class="fine">Tap the chords to include (at least two). They come up in a new random order every time you start.</p>
         <div class="chips" id="mChips"></div>
         <div class="seq" id="mSeq"></div>
         <div class="controls">
@@ -170,6 +170,8 @@
       <h3>Settings</h3>
       <label class="slider"><span>Mic sensitivity</span><input type="range" id="sSens" min="1" max="10" value="5"></label>
       <p class="fine">Raise it if strums aren't picked up. Lower it if the app reacts to talking or background noise.</p>
+      <label class="toggle"><input type="checkbox" id="sStrict" checked> Require open strings to ring</label>
+      <p class="fine">When on, a chord only counts if every open string in the shape rings (for example the open G and high E strings in C).</p>
       <button class="btn ghost small" id="sReset" type="button">Reset progress</button>
       <div id="sResetConfirm" class="confirm" hidden>
         <span>Delete all saved scores and streaks?</span>
